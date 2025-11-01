@@ -44,7 +44,7 @@ class TacticalStrategies:
                 return agent.kickTarget(self.strategy, self.strategy.mypos, lead_target, 
                                        enable_pass_command=True)
         
-        # Otherwise, attack the goal
+        # Otherwise, dribble towards goal or shoot
         return self._attack_goal(agent)
     
     def _attack_goal(self, agent):
@@ -63,7 +63,7 @@ class TacticalStrategies:
         # Distance to goal
         dist_to_goal = np.linalg.norm(ball_pos - goal_pos)
         
-        # If close to goal, shoot directly
+        # If close to goal, shoot directly (use kick)
         if dist_to_goal < 8:
             # Aim for corners when far, center when close
             if dist_to_goal > 4:
@@ -78,9 +78,10 @@ class TacticalStrategies:
             
             agent.world.draw.line(ball_pos, shoot_target, 3,
                                  agent.world.draw.Color.red, "shoot_target")
-            return agent.kickTarget(self.strategy, self.strategy.mypos, shoot_target)
+            # Use Basic_Kick for shooting (use_dribble=False)
+            return agent.kickTarget(self.strategy, self.strategy.mypos, shoot_target, use_dribble=False)
         else:
-            # Far from goal - dribble forward
+            # Far from goal - dribble forward (faster movement)
             # Dribble towards goal, avoiding center if crowded
             dribble_target = goal_pos.copy()
             
@@ -97,7 +98,8 @@ class TacticalStrategies:
             
             agent.world.draw.line(ball_pos, dribble_target, 3,
                                  agent.world.draw.Color.orange, "dribble_target")
-            return agent.kickTarget(self.strategy, self.strategy.mypos, dribble_target)
+            # Use Dribble behavior for faster ball movement (use_dribble=True)
+            return agent.kickTarget(self.strategy, self.strategy.mypos, dribble_target, use_dribble=True)
     
     def get_supporting_action(self, agent):
         """

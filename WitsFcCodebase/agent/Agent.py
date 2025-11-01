@@ -116,9 +116,7 @@ class Agent(Base_Agent):
         finished : bool
             Returns True if the behavior finished or was successfully aborted.
         '''
-        return self.behavior.execute("Dribble",None,None)
-
-        if self.min_opponent_ball_dist < 1.45 and enable_pass_command:
+        if enable_pass_command and hasattr(self, 'min_opponent_ball_dist') and self.min_opponent_ball_dist < 1.45:
             self.scom.commit_pass_command()
 
         self.kick_direction = self.kick_direction if kick_direction is None else kick_direction
@@ -130,28 +128,33 @@ class Agent(Base_Agent):
             return self.fat_proxy_kick()
 
 
-    def kickTarget(self, strategyData, mypos_2d=(0,0),target_2d=(0,0), abort=False, enable_pass_command=False):
+    def kickTarget(self, strategyData, mypos_2d=(0,0), target_2d=(0,0), abort=False, enable_pass_command=False, use_dribble=False):
         '''
-        Walk to ball and kick
+        Walk to ball and kick towards target
 
         Parameters
         ----------
-        kick_direction : float
-            kick direction, in degrees, relative to the field
-        kick_distance : float
-            kick distance in meters
+        strategyData : Strategy
+            Strategy data object
+        mypos_2d : tuple
+            Current position (x, y)
+        target_2d : tuple
+            Target position (x, y)
         abort : bool
-            True to abort.
-            The method returns True upon successful abortion, which is immediate while the robot is aligning itself. 
-            However, if the abortion is requested during the kick, it is delayed until the kick is completed.
-        avoid_pass_command : bool
-            When False, the pass command will be used when at least one opponent is near the ball
+            True to abort
+        enable_pass_command : bool
+            When True, use pass command if opponent is near
+        use_dribble : bool
+            When True, use faster Dribble behavior instead of Basic_Kick
             
         Returns
         -------
         finished : bool
             Returns True if the behavior finished or was successfully aborted.
         '''
+        # Handle None target (fallback to goal)
+        if target_2d is None:
+            target_2d = (15, 0)  # Default to opponent's goal
 
         # Calculate the vector from the current position to the target position
         vector_to_target = np.array(target_2d) - np.array(mypos_2d)
@@ -162,18 +165,25 @@ class Agent(Base_Agent):
         # Calculate the direction (angle) in radians
         direction_radians = np.arctan2(vector_to_target[1], vector_to_target[0])
         
-        # Convert direction to degrees for easier interpretation (optional)
+        # Convert direction to degrees for easier interpretation
         kick_direction = np.degrees(direction_radians)
 
-
+        # Use pass command if opponent is close
         if strategyData.min_opponent_ball_dist < 1.45 and enable_pass_command:
             self.scom.commit_pass_command()
 
-        self.kick_direction = self.kick_direction if kick_direction is None else kick_direction
-        self.kick_distance = self.kick_distance if kick_distance is None else kick_distance
+        self.kick_direction = kick_direction
+        self.kick_distance = kick_distance
 
         if self.fat_proxy_cmd is None: # normal behavior
-            return self.behavior.execute("Basic_Kick", self.kick_direction, abort) # Basic_Kick has no kick distance control
+            # Use Dribble for faster ball movement when dribbling
+            # Use Basic_Kick for actual shots/passes
+            if use_dribble:
+                # Dribble is faster for moving with the ball
+                return self.behavior.execute("Dribble", None, None)
+            else:
+                # Basic_Kick for shooting/passing
+                return self.behavior.execute("Basic_Kick", self.kick_direction, abort)
         else: # fat proxy behavior
             return self.fat_proxy_kick()
 
