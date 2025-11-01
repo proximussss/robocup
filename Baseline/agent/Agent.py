@@ -5,12 +5,8 @@ import numpy as np
 
 from strategy.Assignment import role_assignment 
 from strategy.Strategy import Strategy 
-from strategy.GameModeHandler import GameModeHandler
-from strategy.DecisionMaker import DecisionMaker
-from strategy.TacticalStrategies import TacticalStrategies
 
 from formation.Formation import GenerateBasicFormation
-from formation.DynamicFormation import DynamicFormation
 
 
 class Agent(Base_Agent):
@@ -214,92 +210,55 @@ class Agent(Base_Agent):
 
 
 
-    def select_skill(self, strategyData):
-        """
-        Main decision-making function - chooses between move and kick actions
-        This is called every cycle during active play
-        """
-        #--------------------------------------- Initialize
+    def select_skill(self,strategyData):
+        #--------------------------------------- 2. Decide action
         drawer = self.world.draw
-        
-        # Create helper objects
-        game_mode_handler = GameModeHandler(self.world)
-        decision_maker = DecisionMaker(strategyData)
-        tactical_strategies = TacticalStrategies(strategyData, decision_maker)
-        
-        # Get game mode information
-        game_mode_group = game_mode_handler.get_game_mode_group(strategyData.play_mode)
-        is_our_set_piece = game_mode_handler.is_our_set_piece(strategyData.play_mode, 
-                                                               self.world.team_side_is_left)
-        
-        #--------------------------------------- Generate Dynamic Formation
-        # Use dynamic formation that adapts to ball position and game state
-        formation_positions = DynamicFormation.generate_formation(
-            ball_pos=strategyData.ball_2d,
-            play_mode_group=game_mode_group,
-            is_left_team=self.world.team_side_is_left,
-            is_our_set_piece=is_our_set_piece
-        )
-        
-        #--------------------------------------- Role Assignment
-        # Assign each player to optimal formation position using stable matching
+        path_draw_options = self.path_manager.draw_options
+
+
+        #------------------------------------------------------
+        #Role Assignment
+        if strategyData.active_player_unum == strategyData.robot_model.unum: # I am the active player 
+            drawer.annotation((0,10.5), "Role Assignment Phase" , drawer.Color.yellow, "status")
+        else:
+            drawer.clear("status")
+
+        formation_positions = GenerateBasicFormation()
         point_preferences = role_assignment(strategyData.teammate_positions, formation_positions)
         strategyData.my_desired_position = point_preferences[strategyData.player_unum]
-        strategyData.my_desried_orientation = strategyData.GetDirectionRelativeToMyPositionAndTarget(
-            strategyData.my_desired_position)
-        
-        # Visualize assignment
-        if self.enable_draw:
-            drawer.line(strategyData.mypos, strategyData.my_desired_position, 2, 
-                       drawer.Color.blue, "formation_line")
-            
-            # Draw all formation positions
-            for i, pos in enumerate(formation_positions):
-                drawer.circle(pos, 0.3, 2, drawer.Color.cyan, f"formation_{i}", False)
-        
-        #--------------------------------------- Status Display
-        am_i_active = decision_maker.am_i_closest_to_ball()
-        
-        if am_i_active:
-            status = f"ACTIVE - {game_mode_group.upper()}"
-            drawer.annotation((0, 10.5), status, drawer.Color.yellow, "status")
+        strategyData.my_desried_orientation = strategyData.GetDirectionRelativeToMyPositionAndTarget(strategyData.my_desired_position)
+
+        drawer.line(strategyData.mypos, strategyData.my_desired_position, 2,drawer.Color.blue,"target line")
+
+        if not strategyData.IsFormationReady(point_preferences):
+            return self.move(strategyData.my_desired_position, orientation=strategyData.my_desried_orientation)
+        #else:
+        #     return self.move(strategyData.my_desired_position, orientation=strategyData.ball_dir)
+
+
+    
+        #------------------------------------------------------
+        # Example Behaviour
+        target = (15,0) # Opponents Goal
+
+        if strategyData.active_player_unum == strategyData.robot_model.unum: # I am the active player 
+            drawer.annotation((0,10.5), "Pass Selector Phase" , drawer.Color.yellow, "status")
         else:
-            role = tactical_strategies._determine_player_role()
-            drawer.annotation((0, 10.5), f"Supporting ({role})", drawer.Color.white, "status")
-        
-        #--------------------------------------- Decision Making
-        
-        # Handle set pieces differently
-        if game_mode_group in ["free_kick", "corner_kick", "kick_in", "goal_kick"]:
-            return tactical_strategies.get_set_piece_action(self, is_our_set_piece)
-        
-        # Regular play
-        if game_mode_group == "play_on":
-            if am_i_active:
-                # I'm closest to ball - handle attacking
-                return tactical_strategies.get_attacking_action(self)
+            drawer.clear_player()
+
+        if strategyData.active_player_unum == strategyData.robot_model.unum: # I am the active player 
+            pass_reciever_unum = strategyData.player_unum + 1 # This starts indexing at 1, therefore player 1 wants to pass to player 2
+
+            if pass_reciever_unum != 6:
+                target = strategyData.teammate_positions[pass_reciever_unum-1] # This is 0 indexed so we actually need to minus 1 
             else:
-                # I'm supporting - move to position and be ready
-                return tactical_strategies.get_supporting_action(self)
-        
-        # Kickoff - move to formation
-        if game_mode_group == "kickoff":
-            # Check if formation is ready
-            if not strategyData.IsFormationReady(point_preferences):
-                return self.move(strategyData.my_desired_position, 
-                               orientation=strategyData.my_desried_orientation)
-            else:
-                # Formation ready, active player attacks
-                if am_i_active:
-                    goal_target = np.array([15, 0])
-                    return self.kickTarget(strategyData, strategyData.mypos, goal_target)
-                else:
-                    # Wait in position
-                    return self.move(strategyData.my_desired_position, 
-                                   orientation=strategyData.ball_dir)
-        
-        # Default: move to formation position
-        return self.move(strategyData.my_desired_position, orientation=strategyData.ball_dir)
+                target = (15,0) 
+            print("pass receiver unum : "+str(pass_reciever_unum)+" target: "+str(target))
+            drawer.line(strategyData.mypos, target, 2,drawer.Color.red,"pass line")
+            return self.kickTarget(strategyData,strategyData.mypos,target)
+        else:
+            drawer.clear("pass line")
+            return self.move(strategyData.my_desired_position, orientation=strategyData.ball_dir)
         
 
 

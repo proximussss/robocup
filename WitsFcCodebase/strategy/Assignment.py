@@ -5,12 +5,16 @@ def calculate_euclidean_distance(pos1, pos2):
     Calculate Euclidean distance between two 2D positions.
     
     Args:
-        pos1: First position as ndarray([x, y])
-        pos2: Second position as ndarray([x, y])
+        pos1: First position as ndarray([x, y]) or None
+        pos2: Second position as ndarray([x, y]) or None
     
     Returns:
-        float: Euclidean distance between the positions
+        float: Euclidean distance between the positions, or very large number if either is None
     """
+    # Handle None positions by returning a very large distance
+    if pos1 is None or pos2 is None:
+        return 1000.0
+    
     return np.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
 
 def create_preference_lists(teammate_positions, formation_positions):
@@ -18,7 +22,7 @@ def create_preference_lists(teammate_positions, formation_positions):
     Create preference lists for both players and formation positions based on Euclidean distance.
     
     Args:
-        teammate_positions: List of player positions
+        teammate_positions: List of player positions (some may be None)
         formation_positions: List of formation positions
     
     Returns:
@@ -30,6 +34,12 @@ def create_preference_lists(teammate_positions, formation_positions):
     # Create player preferences (players prefer closer formation positions)
     player_preferences = {}
     for i in range(num_players):
+        # Skip if teammate position is None
+        if teammate_positions[i] is None:
+            # Assign arbitrary preference list (will be filtered out later)
+            player_preferences[i] = list(range(num_positions))
+            continue
+            
         distances = []
         for j in range(num_positions):
             distance = calculate_euclidean_distance(teammate_positions[i], formation_positions[j])
@@ -53,13 +63,14 @@ def create_preference_lists(teammate_positions, formation_positions):
     
     return player_preferences, formation_preferences
 
-def gale_shapley_algorithm(player_preferences, formation_preferences):
+def gale_shapley_algorithm(player_preferences, formation_preferences, teammate_positions):
     """
     Implement the Gale-Shapley algorithm for stable matching.
     
     Args:
         player_preferences: Dictionary mapping player indices to their preference lists
         formation_preferences: Dictionary mapping formation indices to their preference lists
+        teammate_positions: List of teammate positions (to check for None)
     
     Returns:
         dict: Mapping from player indices to formation indices
@@ -67,8 +78,8 @@ def gale_shapley_algorithm(player_preferences, formation_preferences):
     num_players = len(player_preferences)
     num_formations = len(formation_preferences)
     
-    # Initialize all players as unmatched
-    unmatched_players = list(range(num_players))
+    # Initialize all players as unmatched (except those with None positions)
+    unmatched_players = [i for i in range(num_players) if teammate_positions[i] is not None]
     
     # Track current matches (formation -> player)
     current_matches = {i: None for i in range(num_formations)}
@@ -140,7 +151,7 @@ def role_assignment(teammate_positions, formation_positions):
     )
     
     # Run Gale-Shapley algorithm
-    player_to_formation = gale_shapley_algorithm(player_preferences, formation_preferences)
+    player_to_formation = gale_shapley_algorithm(player_preferences, formation_preferences, teammate_positions)
     
     # Convert to the required output format (unum 1-5 to formation positions)
     point_preferences = {}
