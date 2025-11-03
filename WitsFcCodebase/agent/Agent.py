@@ -26,6 +26,11 @@ class Agent(Base_Agent):
         self.kick_distance = 0
         self.fat_proxy_cmd = "" if is_fat_proxy else None
         self.fat_proxy_walk = np.zeros(3) # filtered walk parameters for fat proxy
+        
+        # Track kick state to prevent falling
+        self.kick_in_progress = False
+        self.kick_finish_time = 0
+        self.last_ball_distance = float('inf')
 
         self.init_pos = ([-14,0],[-9,-5],[-9,0],[-9,5],[-5,-5],[-5,0],[-5,5],[-1,-6],[-1,-2.5],[-1,2.5],[-1,6])[unum-1] # initial formation
 
@@ -112,8 +117,7 @@ class Agent(Base_Agent):
         finished : bool
             Returns True if the behavior finished or was successfully aborted.
         '''
-        return self.behavior.execute("Dribble",None,None)
-
+        # NO DRIBBLING - use Basic_Kick only
         if self.min_opponent_ball_dist < 1.45 and enable_pass_command:
             self.scom.commit_pass_command()
 
@@ -149,6 +153,39 @@ class Agent(Base_Agent):
             Returns True if the behavior finished or was successfully aborted.
         '''
 
+        behavior = self.behavior
+        world = self.world
+        robot = self.world.robot
+        
+        # Check if we're currently kicking - wait for completion to prevent falling
+        if self.kick_in_progress:
+            # Check if kick is finished by checking if ball has moved significantly
+            ball_pos = world.ball_abs_pos[:2]
+            my_pos = robot.loc_head_position[:2]
+            current_ball_dist = np.linalg.norm(ball_pos - my_pos)
+            
+            # Check if ball moved away significantly (kick completed)
+            if current_ball_dist > self.last_ball_distance + 0.5:
+                # Ball moved - kick likely completed
+                self.kick_in_progress = False
+                self.kick_finish_time = world.time_local_ms
+                self.state = 2  # Set state to kicking for recovery
+            # Check timeout - if too long, reset
+            elif world.time_local_ms - self.kick_finish_time > 2000:
+                self.kick_in_progress = False
+            
+            # During kick recovery, maintain stability
+            if self.state == 2:
+                # Short recovery period after kick to maintain balance
+                if world.time_local_ms - self.kick_finish_time < 300:
+                    # Stabilize - execute Zero_Bent_Knees for balance
+                    behavior.execute("Zero_Bent_Knees_Auto_Head")
+                    return False
+                else:
+                    # Recovery complete
+                    self.state = 0
+                    return True
+
         # Calculate the vector from the current position to the target position
         vector_to_target = np.array(target_2d) - np.array(mypos_2d)
         
@@ -161,15 +198,28 @@ class Agent(Base_Agent):
         # Convert direction to degrees for easier interpretation (optional)
         kick_direction = np.degrees(direction_radians)
 
-
         if strategyData.min_opponent_ball_dist < 1.45 and enable_pass_command:
             self.scom.commit_pass_command()
 
-        self.kick_direction = self.kick_direction if kick_direction is None else kick_direction
-        self.kick_distance = self.kick_distance if kick_distance is None else kick_distance
+        # Store kick direction
+        self.kick_direction = kick_direction
+        self.kick_distance = kick_distance
+        
+        # Track ball distance before kick
+        ball_pos = world.ball_abs_pos[:2]
+        my_pos = robot.loc_head_position[:2]
+        self.last_ball_distance = np.linalg.norm(ball_pos - my_pos)
 
         if self.fat_proxy_cmd is None: # normal behavior
-            return self.behavior.execute("Basic_Kick", self.kick_direction, abort) # Basic_Kick has no kick distance control
+            # Execute kick
+            kick_result = self.behavior.execute("Basic_Kick", self.kick_direction, abort)
+            
+            # Detect when kick starts (when we're close to ball)
+            if not self.kick_in_progress and self.last_ball_distance < 0.5:
+                self.kick_in_progress = True
+                self.kick_finish_time = world.time_local_ms
+            
+            return kick_result
         else: # fat proxy behavior
             return self.fat_proxy_kick()
 
@@ -187,6 +237,26 @@ class Agent(Base_Agent):
             self.beam(True) # avoid center circle
         elif self.state == 1 or (behavior.is_ready("Get_Up") and self.fat_proxy_cmd is None):
             self.state = 0 if behavior.execute("Get_Up") else 1
+        elif self.state == 2:
+            # Post-kick recovery state - stabilize after kicking to prevent falling
+            # Track ball movement to detect kick completion
+            ball_pos = self.world.ball_abs_pos[:2]
+            my_pos = self.world.robot.loc_head_position[:2]
+            current_ball_dist = np.linalg.norm(ball_pos - my_pos)
+            
+            # Check if ball moved away significantly (kick completed)
+            if hasattr(self, 'last_ball_distance') and current_ball_dist > self.last_ball_distance + 0.5:
+                # Ball moved - kick completed, continue recovery
+                pass
+            
+            # Recovery period: stabilize for 300ms after kick
+            if self.world.time_local_ms - self.kick_finish_time > 300:
+                self.state = 0  # Recovery complete
+                if strategyData.play_mode != self.world.M_BEFORE_KICKOFF:
+                    self.select_skill(strategyData)
+            else:
+                # Maintain stability during recovery to prevent falling
+                behavior.execute("Zero_Bent_Knees_Auto_Head")
         else:
             if strategyData.play_mode != self.world.M_BEFORE_KICKOFF:
                 self.select_skill(strategyData)
@@ -223,12 +293,71 @@ class Agent(Base_Agent):
         else:
             drawer.clear("status")
 
-        formation_positions = GenerateBasicFormation()
+        # Determine formation based on ball position and game state
+        from formation.Formation import (GenerateBasicFormation, GenerateDefensiveFormation, 
+                                         GenerateAttackingFormation, GenerateStartingFormation)
+        ball_x = strategyData.ball_2d[0]
+        
+        # Check if match just started (before kickoff or very early)
+        is_match_start = (strategyData.play_mode == self.world.M_BEFORE_KICKOFF or 
+                         self.world.time_game < 2.0)  # First 2 seconds
+        
+        # Formation selection logic:
+        if is_match_start:
+            # Starting formation: front player in middle
+            formation_positions = GenerateStartingFormation()
+        elif ball_x < -5.0:  # Ball in our defensive third
+            # Defensive formation: all collapse to defend
+            formation_positions = GenerateDefensiveFormation(strategyData.ball_2d)
+        elif ball_x > 5.0:  # Ball in opponent half
+            # Attacking formation: one defender back, rest push forward to assist scoring
+            formation_positions = GenerateAttackingFormation(strategyData.ball_2d)
+        else:  # Ball central (-5 to 5)
+            # Balanced formation: normal play
+            formation_positions = GenerateBasicFormation()
+        
         point_preferences = role_assignment(strategyData.teammate_positions, formation_positions)
         strategyData.my_desired_position = point_preferences[strategyData.player_unum]
         
         drawer.line(strategyData.mypos, strategyData.my_desired_position, 2,drawer.Color.blue,"target line")
 
+        #------------------------------------------------------
+        # Goalkeeper Support: Defender takes over after goalkeeper clears
+        # Check if defender should take over from goalkeeper
+        if (strategyData.player_unum == 2 and  # This is the defender
+            strategyData.active_player_unum == 1 and  # Goalkeeper is active
+            strategyData.ShouldDefenderTakeOverFromGoalkeeper()):
+            # Defender becomes active player after goalkeeper clearance
+            drawer.annotation((0,10.5), "Defender Taking Over" , drawer.Color.cyan, "status")
+            # Use intelligent pass/shoot selection
+            action_type, target, receiver_unum = strategyData.ShouldShootOrPass(
+                strategyData.player_unum,
+                strategyData.mypos,
+                strategyData.ball_2d,
+                strategyData.teammate_positions,
+                strategyData.opponent_positions,
+                shoot_threshold=0.4
+            )
+            
+            if action_type == 'shoot':
+                drawer.line(strategyData.mypos, target, 3, drawer.Color.green, "shoot line")
+                drawer.clear("pass line")
+                ball_pos = self.world.ball_abs_pos[:2]
+                my_pos = self.world.robot.loc_head_position[:2]
+                self.last_ball_distance = np.linalg.norm(ball_pos - my_pos)
+                self.kick_in_progress = True
+                self.kick_finish_time = self.world.time_local_ms
+                return self.kickTarget(strategyData, strategyData.mypos, target)
+            elif action_type == 'pass' and target is not None:
+                drawer.line(strategyData.mypos, target, 2, drawer.Color.red, "pass line")
+                drawer.clear("shoot line")
+                ball_pos = self.world.ball_abs_pos[:2]
+                my_pos = self.world.robot.loc_head_position[:2]
+                self.last_ball_distance = np.linalg.norm(ball_pos - my_pos)
+                self.kick_in_progress = True
+                self.kick_finish_time = self.world.time_local_ms
+                return self.kickTarget(strategyData, strategyData.mypos, target)
+        
         #------------------------------------------------------
         # Active Player Decision (Submission 2 - Optimized)
         if strategyData.active_player_unum == strategyData.robot_model.unum: # I am the active player 
@@ -254,15 +383,33 @@ class Agent(Base_Agent):
                 if action_type == 'shoot':
                     drawer.line(strategyData.mypos, target, 3, drawer.Color.green, "shoot line")
                     drawer.clear("pass line")
+                    # Track ball distance before kick for fall prevention
+                    ball_pos = self.world.ball_abs_pos[:2]
+                    my_pos = self.world.robot.loc_head_position[:2]
+                    self.last_ball_distance = np.linalg.norm(ball_pos - my_pos)
+                    self.kick_in_progress = True
+                    self.kick_finish_time = self.world.time_local_ms
                     return self.kickTarget(strategyData, strategyData.mypos, target)
                 elif action_type == 'pass' and target is not None:
                     drawer.line(strategyData.mypos, target, 2, drawer.Color.red, "pass line")
                     drawer.clear("shoot line")
+                    # Track ball distance before kick for fall prevention
+                    ball_pos = self.world.ball_abs_pos[:2]
+                    my_pos = self.world.robot.loc_head_position[:2]
+                    self.last_ball_distance = np.linalg.norm(ball_pos - my_pos)
+                    self.kick_in_progress = True
+                    self.kick_finish_time = self.world.time_local_ms
                     return self.kickTarget(strategyData, strategyData.mypos, target)
                 else:
                     # Fallback: shoot at goal
                     drawer.line(strategyData.mypos, (15, 0), 3, drawer.Color.green, "shoot line")
                     drawer.clear("pass line")
+                    # Track ball distance before kick for fall prevention
+                    ball_pos = self.world.ball_abs_pos[:2]
+                    my_pos = self.world.robot.loc_head_position[:2]
+                    self.last_ball_distance = np.linalg.norm(ball_pos - my_pos)
+                    self.kick_in_progress = True
+                    self.kick_finish_time = self.world.time_local_ms
                     return self.kickTarget(strategyData, strategyData.mypos, (15, 0))
             else:
                 # Formation not ready and not urgent - move to position quickly

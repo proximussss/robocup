@@ -100,7 +100,7 @@ class Strategy():
     def GetOptimalDefensivePosition(self, ball_pos, my_unum, teammate_positions, opponent_positions):
         """
         Calculate optimal defensive position when not active player.
-        Balances formation position with ball pressure.
+        Implements defensive collapse when ball is near keeper, normal formation otherwise.
         
         Args:
             ball_pos: Current ball position
@@ -111,28 +111,76 @@ class Strategy():
         Returns:
             tuple: (target_position, orientation)
         """
-        # Get formation position
-        from formation.Formation import GenerateBasicFormation
+        from formation.Formation import (GenerateBasicFormation, GenerateDefensiveFormation, 
+                                         GenerateAttackingFormation)
         from strategy.Assignment import role_assignment
-        formation_positions = GenerateBasicFormation()
-        point_preferences = role_assignment(teammate_positions, formation_positions)
-        formation_pos = point_preferences.get(my_unum, self.mypos)
         
-        # If ball is in our half and close, apply defensive pressure
         ball_arr = np.array(ball_pos)
         my_pos_arr = np.array(self.mypos)
         dist_to_ball = np.linalg.norm(my_pos_arr - ball_arr)
         
-        # If ball is in defensive third, move slightly toward ball
-        if ball_arr[0] < -5.0 and dist_to_ball < 8.0:
+        # Determine formation based on ball position:
+        # - Ball in our defensive third (x < -5): Defensive formation
+        # - Ball in opponent half (x > 5): Attacking formation (one defender back)
+        # - Ball central (-5 to 5): Normal formation
+        
+        use_defensive_formation = ball_arr[0] < -5.0
+        use_attacking_formation = ball_arr[0] > 5.0
+        
+        # Use defensive formation when ball is near keeper
+        if use_defensive_formation:
+            # Defensive formation: goalkeeper + defender support, all players in our half
+            formation_positions = GenerateDefensiveFormation(ball_pos)
+            point_preferences = role_assignment(teammate_positions, formation_positions)
+            
+            # Special handling: defender (player 2) always supports goalkeeper
+            if my_unum == 2:
+                # Defender positions to support goalkeeper and ready to take over after clearance
+                target_pos = self.GetDefenderPositionForGoalkeeperSupport(ball_pos)
+            elif self.active_player_unum == 1:  # Goalkeeper is active
+                # Other players use defensive formation
+                formation_pos = point_preferences.get(my_unum, self.mypos)
+                target_pos = formation_pos
+            else:
+                formation_pos = point_preferences.get(my_unum, self.mypos)
+                target_pos = formation_pos
+            
+            # If ball is very close to keeper (x < -10), all players collapse further
+            if ball_arr[0] < -10.0:
+                # Collapse all players closer to our half
+                if target_pos[0] > -5.0:
+                    # Pull players back to our half if they're too far forward
+                    target_pos[0] = -5.0
+        elif use_attacking_formation:
+            # Attacking formation: one defender stays back (with goalkeeper), rest push forward
+            formation_positions = GenerateAttackingFormation(ball_pos)
+            point_preferences = role_assignment(teammate_positions, formation_positions)
+            
+            # Special handling: defender (player 2) must stay back with goalkeeper
+            if my_unum == 2:
+                # Defender stays back - don't push forward
+                target_pos = np.array([-10, 0])  # Stay back with goalkeeper
+            else:
+                # Other players use attacking formation (push forward)
+                formation_pos = point_preferences.get(my_unum, self.mypos)
+                target_pos = formation_pos
+        else:
+            # Normal formation when ball is central
+            formation_positions = GenerateBasicFormation()
+            point_preferences = role_assignment(teammate_positions, formation_positions)
+            formation_pos = point_preferences.get(my_unum, self.mypos)
+            target_pos = formation_pos
+        
+        # Apply ball pressure: move slightly toward ball if in defensive third
+        if ball_arr[0] < -5.0 and dist_to_ball < 8.0 and my_unum != self.active_player_unum:
             # Move toward ball but stay between ball and goal
-            defensive_offset = (ball_arr - my_pos_arr) * 0.3  # 30% toward ball
-            target_pos = formation_pos + defensive_offset
+            defensive_offset = (ball_arr - my_pos_arr) * 0.25  # 25% toward ball
+            target_pos = np.array(target_pos) + defensive_offset
             # Keep in formation bounds
-            target_pos[0] = max(-14.5, min(target_pos[0], 5.0))
+            target_pos[0] = max(-14.5, min(target_pos[0], -2.0))  # Stay in our half when defensive
             target_pos[1] = np.clip(target_pos[1], -10, 10)
         else:
-            target_pos = formation_pos
+            target_pos = np.array(target_pos)
         
         # Face the ball or goal direction
         if dist_to_ball < 6.0:
@@ -141,6 +189,56 @@ class Strategy():
             orientation = self.GetDirectionRelativeToMyPositionAndTarget(target_pos)
         
         return target_pos, orientation
+    
+    def ShouldDefenderTakeOverFromGoalkeeper(self):
+        """
+        Determine if defender should take over after goalkeeper clears.
+        Checks if goalkeeper is active and ball is moving away from goal.
+        
+        Returns:
+            bool: True if defender should take over
+        """
+        # If goalkeeper (player 1) is active and ball is moving away from goal, defender should take over
+        if self.active_player_unum == 1:  # Goalkeeper is active
+            ball_arr = np.array(self.ball_2d)
+            ball_speed = self.ball_speed
+            
+            # Check if ball has been cleared (moved forward from goalkeeper position)
+            # Defender should take over when ball is moving away from our goal
+            if ball_arr[0] > -12.0:  # Ball is forward of goalkeeper
+                # If ball has speed (recently kicked) or ball is forward enough
+                if ball_speed > 0.2 or ball_arr[0] > -10.0:
+                    return True
+        
+        return False
+    
+    def GetDefenderPositionForGoalkeeperSupport(self, ball_pos):
+        """
+        Get optimal defender position to support goalkeeper.
+        Defender should be close to goalkeeper when ball is near keeper,
+        ready to take over after clearance.
+        
+        Args:
+            ball_pos: Current ball position
+            
+        Returns:
+            np.array: Defender target position
+        """
+        ball_arr = np.array(ball_pos)
+        goalkeeper_pos = np.array([-13.5, 0])
+        
+        # If ball is very close to goalkeeper (x < -12), defender should be right beside keeper
+        if ball_arr[0] < -12.0:
+            # Position defender close to goalkeeper, slightly forward and to the side
+            defender_pos = np.array([-11.5, 2.0])
+        elif ball_arr[0] < -10.0:
+            # Ball near keeper - defender positioned to receive clearance
+            defender_pos = np.array([-10.5, 2.5])
+        else:
+            # Ball has been cleared - defender moves forward to take over
+            defender_pos = np.array([ball_arr[0] + 1.5, max(-3, min(3, ball_arr[1] + 1))])
+        
+        return defender_pos
 
     def GetDirectionRelativeToMyPositionAndTarget(self,target):
         target_vec = target - self.my_head_pos_2d
@@ -405,16 +503,50 @@ class Strategy():
                       0.2 * forward_score + 
                       0.1 * blocking_score)
         
-        # Optimize target: aim at corner if far, center if close
-        if dist_to_goal > 12.0:
-            # Far shot - aim at a corner (alternate based on position)
-            if shooter_pos[1] > 0:
-                target_position = np.array([goal_pos[0], goal_pos[1] - 0.8])  # Lower corner
+        # Optimize target: ensure accurate shooting, especially when near goal posts
+        # Goal posts are at y = -1.05 and y = +1.05, goal opening is from -1.01 to +1.01
+        goal_post_top = 1.01
+        goal_post_bottom = -1.01
+        
+        # Calculate player's angle relative to goal posts
+        # Check which side of goal the player is on
+        vec_to_goal = goal_pos - shooter_pos
+        angle_to_goal = M.vector_angle(vec_to_goal)
+        
+        # Calculate distance from shooter's y position to goal center
+        shooter_y_offset = shooter_pos[1]
+        
+        # When very close to goal (within 8 meters), aim carefully to avoid missing
+        if dist_to_goal < 8.0:
+            # Very close - aim for a safe spot inside goal (not at posts)
+            # If player is at extreme angle or near goal post area, aim carefully
+            if abs(shooter_y_offset) > 6.0:  # Player is wide (near goal post area)
+                # Player is near a goal post side - aim for opposite side to ensure goal
+                if shooter_y_offset > 6.0:  # Top side (near top post)
+                    target_position = np.array([goal_pos[0], goal_post_bottom + 0.6])  # Lower part of goal (away from top post)
+                else:  # Bottom side (near bottom post)
+                    target_position = np.array([goal_pos[0], goal_post_top - 0.6])  # Upper part of goal (away from bottom post)
             else:
-                target_position = np.array([goal_pos[0], goal_pos[1] + 0.8])  # Upper corner
+                # Central position - aim center of goal for maximum safety
+                target_position = goal_pos
+        elif dist_to_goal > 12.0:
+            # Far shot - aim at a corner (alternate based on position)
+            # But keep safe margin from posts
+            if shooter_y_offset > 0:
+                target_position = np.array([goal_pos[0], goal_post_bottom + 0.7])  # Lower corner (safe margin from bottom post)
+            else:
+                target_position = np.array([goal_pos[0], goal_post_top - 0.7])  # Upper corner (safe margin from top post)
         else:
-            # Close shot - aim center
-            target_position = goal_pos
+            # Medium distance - aim center with small offset based on position
+            if shooter_y_offset > 3.0:
+                target_position = np.array([goal_pos[0], goal_pos[1] - 0.3])  # Slightly below center
+            elif shooter_y_offset < -3.0:
+                target_position = np.array([goal_pos[0], goal_pos[1] + 0.3])  # Slightly above center
+            else:
+                target_position = goal_pos  # Center of goal
+        
+        # Ensure target is well within goal bounds (safe margin from posts)
+        target_position[1] = np.clip(target_position[1], goal_post_bottom + 0.15, goal_post_top - 0.15)
         
         return shoot_score, target_position
 
