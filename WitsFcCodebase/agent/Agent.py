@@ -5,12 +5,8 @@ import numpy as np
 
 from strategy.Assignment import role_assignment 
 from strategy.Strategy import Strategy 
-from strategy.GameModeHandler import GameModeHandler
-from strategy.DecisionMaker import DecisionMaker
-from strategy.TacticalStrategies import TacticalStrategies
 
 from formation.Formation import GenerateBasicFormation
-from formation.DynamicFormation import DynamicFormation
 
 
 class Agent(Base_Agent):
@@ -116,7 +112,9 @@ class Agent(Base_Agent):
         finished : bool
             Returns True if the behavior finished or was successfully aborted.
         '''
-        if enable_pass_command and hasattr(self, 'min_opponent_ball_dist') and self.min_opponent_ball_dist < 1.45:
+        return self.behavior.execute("Dribble",None,None)
+
+        if self.min_opponent_ball_dist < 1.45 and enable_pass_command:
             self.scom.commit_pass_command()
 
         self.kick_direction = self.kick_direction if kick_direction is None else kick_direction
@@ -128,33 +126,28 @@ class Agent(Base_Agent):
             return self.fat_proxy_kick()
 
 
-    def kickTarget(self, strategyData, mypos_2d=(0,0), target_2d=(0,0), abort=False, enable_pass_command=False, use_dribble=False):
+    def kickTarget(self, strategyData, mypos_2d=(0,0),target_2d=(0,0), abort=False, enable_pass_command=False):
         '''
-        Walk to ball and kick towards target
+        Walk to ball and kick
 
         Parameters
         ----------
-        strategyData : Strategy
-            Strategy data object
-        mypos_2d : tuple
-            Current position (x, y)
-        target_2d : tuple
-            Target position (x, y)
+        kick_direction : float
+            kick direction, in degrees, relative to the field
+        kick_distance : float
+            kick distance in meters
         abort : bool
-            True to abort
-        enable_pass_command : bool
-            When True, use pass command if opponent is near
-        use_dribble : bool
-            When True, use faster Dribble behavior instead of Basic_Kick
+            True to abort.
+            The method returns True upon successful abortion, which is immediate while the robot is aligning itself. 
+            However, if the abortion is requested during the kick, it is delayed until the kick is completed.
+        avoid_pass_command : bool
+            When False, the pass command will be used when at least one opponent is near the ball
             
         Returns
         -------
         finished : bool
             Returns True if the behavior finished or was successfully aborted.
         '''
-        # Handle None target (fallback to goal)
-        if target_2d is None:
-            target_2d = (15, 0)  # Default to opponent's goal
 
         # Calculate the vector from the current position to the target position
         vector_to_target = np.array(target_2d) - np.array(mypos_2d)
@@ -165,25 +158,18 @@ class Agent(Base_Agent):
         # Calculate the direction (angle) in radians
         direction_radians = np.arctan2(vector_to_target[1], vector_to_target[0])
         
-        # Convert direction to degrees for easier interpretation
+        # Convert direction to degrees for easier interpretation (optional)
         kick_direction = np.degrees(direction_radians)
 
-        # Use pass command if opponent is close
+
         if strategyData.min_opponent_ball_dist < 1.45 and enable_pass_command:
             self.scom.commit_pass_command()
 
-        self.kick_direction = kick_direction
-        self.kick_distance = kick_distance
+        self.kick_direction = self.kick_direction if kick_direction is None else kick_direction
+        self.kick_distance = self.kick_distance if kick_distance is None else kick_distance
 
         if self.fat_proxy_cmd is None: # normal behavior
-            # Use Dribble for faster ball movement when dribbling
-            # Use Basic_Kick for actual shots/passes
-            if use_dribble:
-                # Dribble is faster for moving with the ball
-                return self.behavior.execute("Dribble", None, None)
-            else:
-                # Basic_Kick for shooting/passing
-                return self.behavior.execute("Basic_Kick", self.kick_direction, abort)
+            return self.behavior.execute("Basic_Kick", self.kick_direction, abort) # Basic_Kick has no kick distance control
         else: # fat proxy behavior
             return self.fat_proxy_kick()
 
@@ -224,92 +210,79 @@ class Agent(Base_Agent):
 
 
 
-    def select_skill(self, strategyData):
-        """
-        Main decision-making function - chooses between move and kick actions
-        This is called every cycle during active play
-        """
-        #--------------------------------------- Initialize
+    def select_skill(self,strategyData):
+        #--------------------------------------- 2. Decide action
         drawer = self.world.draw
-        
-        # Create helper objects
-        game_mode_handler = GameModeHandler(self.world)
-        decision_maker = DecisionMaker(strategyData)
-        tactical_strategies = TacticalStrategies(strategyData, decision_maker)
-        
-        # Get game mode information
-        game_mode_group = game_mode_handler.get_game_mode_group(strategyData.play_mode)
-        is_our_set_piece = game_mode_handler.is_our_set_piece(strategyData.play_mode, 
-                                                               self.world.team_side_is_left)
-        
-        #--------------------------------------- Generate Dynamic Formation
-        # Use dynamic formation that adapts to ball position and game state
-        formation_positions = DynamicFormation.generate_formation(
-            ball_pos=strategyData.ball_2d,
-            play_mode_group=game_mode_group,
-            is_left_team=self.world.team_side_is_left,
-            is_our_set_piece=is_our_set_piece
-        )
-        
-        #--------------------------------------- Role Assignment
-        # Assign each player to optimal formation position using stable matching
+        path_draw_options = self.path_manager.draw_options
+
+
+        #------------------------------------------------------
+        #Role Assignment
+        if strategyData.active_player_unum == strategyData.robot_model.unum: # I am the active player 
+            drawer.annotation((0,10.5), "Role Assignment Phase" , drawer.Color.yellow, "status")
+        else:
+            drawer.clear("status")
+
+        formation_positions = GenerateBasicFormation()
         point_preferences = role_assignment(strategyData.teammate_positions, formation_positions)
         strategyData.my_desired_position = point_preferences[strategyData.player_unum]
-        strategyData.my_desried_orientation = strategyData.GetDirectionRelativeToMyPositionAndTarget(
-            strategyData.my_desired_position)
         
-        # Visualize assignment
-        if self.enable_draw:
-            drawer.line(strategyData.mypos, strategyData.my_desired_position, 2, 
-                       drawer.Color.blue, "formation_line")
+        drawer.line(strategyData.mypos, strategyData.my_desired_position, 2,drawer.Color.blue,"target line")
+
+        #------------------------------------------------------
+        # Active Player Decision (Submission 2 - Optimized)
+        if strategyData.active_player_unum == strategyData.robot_model.unum: # I am the active player 
+            drawer.annotation((0,10.5), "Active Player" , drawer.Color.yellow, "status")
             
-            # Draw all formation positions
-            for i, pos in enumerate(formation_positions):
-                drawer.circle(pos, 0.3, 2, drawer.Color.cyan, f"formation_{i}", False)
-        
-        #--------------------------------------- Status Display
-        am_i_active = decision_maker.am_i_closest_to_ball()
-        
-        if am_i_active:
-            status = f"ACTIVE - {game_mode_group.upper()}"
-            drawer.annotation((0, 10.5), status, drawer.Color.yellow, "status")
-        else:
-            role = tactical_strategies._determine_player_role()
-            drawer.annotation((0, 10.5), f"Supporting ({role})", drawer.Color.white, "status")
-        
-        #--------------------------------------- Decision Making
-        
-        # Handle set pieces differently
-        if game_mode_group in ["free_kick", "corner_kick", "kick_in", "goal_kick"]:
-            return tactical_strategies.get_set_piece_action(self, is_our_set_piece)
-        
-        # Regular play
-        if game_mode_group == "play_on":
-            if am_i_active:
-                # I'm closest to ball - handle attacking
-                return tactical_strategies.get_attacking_action(self)
-            else:
-                # I'm supporting - move to position and be ready
-                return tactical_strategies.get_supporting_action(self)
-        
-        # Kickoff - move to formation
-        if game_mode_group == "kickoff":
-            # Check if formation is ready
-            if not strategyData.IsFormationReady(point_preferences):
-                return self.move(strategyData.my_desired_position, 
-                               orientation=strategyData.my_desried_orientation)
-            else:
-                # Formation ready, active player attacks
-                if am_i_active:
-                    goal_target = np.array([15, 0])
-                    return self.kickTarget(strategyData, strategyData.mypos, goal_target)
+            # More lenient formation check - don't wait too long
+            # If formation is close enough or we're near goal, act immediately
+            dist_to_goal = np.linalg.norm(np.array(strategyData.mypos) - np.array([15, 0]))
+            formation_ready = strategyData.IsFormationReady(point_preferences)
+            
+            # Act if formation is ready OR if we're close to goal (be aggressive)
+            if formation_ready or dist_to_goal < 10.0 or np.linalg.norm(np.array(strategyData.mypos) - np.array(strategyData.ball_2d)) < 2.0:
+                # Use intelligent pass/shoot selection with lower threshold for aggression
+                action_type, target, receiver_unum = strategyData.ShouldShootOrPass(
+                    strategyData.player_unum,
+                    strategyData.mypos,
+                    strategyData.ball_2d,
+                    strategyData.teammate_positions,
+                    strategyData.opponent_positions,
+                    shoot_threshold=0.4  # Lower threshold for more aggressive shooting
+                )
+                
+                if action_type == 'shoot':
+                    drawer.line(strategyData.mypos, target, 3, drawer.Color.green, "shoot line")
+                    drawer.clear("pass line")
+                    return self.kickTarget(strategyData, strategyData.mypos, target)
+                elif action_type == 'pass' and target is not None:
+                    drawer.line(strategyData.mypos, target, 2, drawer.Color.red, "pass line")
+                    drawer.clear("shoot line")
+                    return self.kickTarget(strategyData, strategyData.mypos, target)
                 else:
-                    # Wait in position
-                    return self.move(strategyData.my_desired_position, 
-                                   orientation=strategyData.ball_dir)
-        
-        # Default: move to formation position
-        return self.move(strategyData.my_desired_position, orientation=strategyData.ball_dir)
+                    # Fallback: shoot at goal
+                    drawer.line(strategyData.mypos, (15, 0), 3, drawer.Color.green, "shoot line")
+                    drawer.clear("pass line")
+                    return self.kickTarget(strategyData, strategyData.mypos, (15, 0))
+            else:
+                # Formation not ready and not urgent - move to position quickly
+                strategyData.my_desired_orientation = strategyData.GetDirectionRelativeToMyPositionAndTarget(strategyData.ball_2d)
+                return self.move(strategyData.my_desired_position, orientation=strategyData.my_desired_orientation, is_aggressive=True)
+        else:
+            # Not the active player - use optimal defensive positioning
+            drawer.clear("pass line")
+            drawer.clear("shoot line")
+            drawer.clear_player()
+            
+            # Get optimal defensive position with ball pressure awareness
+            defensive_pos, defensive_ori = strategyData.GetOptimalDefensivePosition(
+                strategyData.ball_2d,
+                strategyData.player_unum,
+                strategyData.teammate_positions,
+                strategyData.opponent_positions
+            )
+            
+            return self.move(defensive_pos, orientation=defensive_ori)
         
 
 
